@@ -13,7 +13,7 @@
 2. 被动接收通讯的进程定义为 Server 进程。
 <html>
 <body>
-    <img width="300", src="images/2-2-1-multi-process.png">
+    <img width="300", src="images/2-1-1-define.png">
 </body>
 </html>
 

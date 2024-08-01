@@ -12,7 +12,7 @@ Shared memory is the fastest inter-process communication (IPC) method in Linux, 
 2. The process that receives communication passively is defined as the Server process.
 <html>
 <body>
-    <img width="300", src="images/2-2-1-multi-process.png">
+    <img width="300", src="images/2-1-1-define.png">
 </body>
 </html>
 
