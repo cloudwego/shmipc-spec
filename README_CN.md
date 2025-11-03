@@ -47,11 +47,13 @@ Client 进程和 Server 进程的多个线程也可以是 N : N 的关系。
 
 Client 进程和 Server 进程在连接上所传递的一条消息定义如下：
 
-<html>
-<body>
-    <img  height="200", src="images/3-1-1-message_define.jpeg">
-</body>
-</html>
+```
++---------------+--------------+--------------+-------------+---------------+
+| 4 Byte length | 2 Byte magic | 1 Byte version | 1 Byte type |    payload  |
++---------------+--------------+--------------+-------------+---------------+
+|<---------------------- Header --------------------------->|
+|<------------------------------ Message ---------------------------------->|
+```
 
 | 字段    | 大小   | 解释                                             |
 | --------- | -------- | -------------------------------------------------- |
@@ -66,6 +68,7 @@ Client 进程和 Server 进程在连接上所传递的一条消息定义如下�
 | 类型                  | 解释                                                                              |
 | ----------------------- | ----------------------------------------------------------------------------------- |
 | ExchangeMetadata      | 协议协商，交换元信息，元信息包括当前支持的 feature 列表。详见章节四：协议初始化。 |
+| VersionExchange      | 协议协商，交换版本信息，主要是生产环境中协议演进时为了兼容性，需要加入此协商。 |
 | ShareMemoryByFilePath | 通过文件路径映射共享内存，详见章节四：协议初始化。                                |
 | ShareMemoryByMemfd    | 通过 mmefd 映射共享内存，详见章节四：协议初始化。                                 |
 | AckReadyRecvFD        | 已做好准备接收 memfd，详见章节四：协议初始化。                                            |
@@ -81,7 +84,8 @@ u16str 编码格式： string length 2 Byte | string body
 
 | 类型                  | payload                                                                                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------------------------|
-| ExchangeMetadata      | payload 为元信息，采用 json 格式，保留足够的扩展性。
+| ExchangeMetadata      | payload 为元信息，格式参考4.2章节。 |
+| VersionExchange | 空
 | ShareMemoryByFilePath | QueuePath (u16str) | BufferPath (u16str)                                                                                                   |
 | ShareMemoryByMemfd    | QueuePath (u16str) | BufferPath (u16str)                                                                                                   |
 | AckReadyRecvFD        | 空                                                                                                                                         |
@@ -99,29 +103,86 @@ u16str 编码格式： string length 2 Byte | string body
 ## 四、协议初始化
 
 
-<html>
-<body>
-    <img style="max-width: 100%; max-height: 400px;" ,  src="images/4-1-1-protocol_initialization.jpeg">
-</body>
-</html>
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
 
+    %% 1. 建立连接
+    Note right of Server: 1.1 Server 监听 socket (localhost:$PORT 或 UDS)
+    Client->>Server: 1.2 建立连接
 
+    %% 2. 版本协商
+    Client->>Server: 2.1 VersionExchange (Client 最高版本)
+    Server-->>Client: 2.2 VersionExchange (min of Client&Server 支持的最高版本)
+    Note left of Client: 2.3 Client 采用 Server 返回的版本
+
+    %% 3. Metadata协商
+    Client->>Server: 3.1 ExchangeMetadata (Client 元信息, 需开启的 feature)
+    Server-->>Client: 3.2 ExchangeMetadata (Server 实际支持的 feature)
+    Note left of Client: 3.4 Client 记录最终开启的 feature 集合
+
+    %% 4. 映射共享内存 (原文步骤号为 3)
+    alt 通过 Memfd (ShareMemoryByMemfd)
+        Client->>Server: 4.1 ShareMemoryByMemfd
+        Server-->>Client: 4.2 AckRecvMemFd (已准备接收 memfd)
+        Client->>Server: 4.3 发送 memfd
+        Note over Client,Server: 4.3 必须通过 Unix Domain Socket (TCP 不支持)
+        Server-->>Client: 4.4 AckShareMemory (Server 映射完成)
+    else 通过文件 (ShareMemoryByFile)
+        Client->>Server: 4.1 & 4.5 ShareMemoryByFile
+        Note over Client,Server: 跳过 4.2 - 4.3 步
+        Server-->>Client: 4.4 AckShareMemory (Server 映射完成)
+    end
+```
+
+### 4.1 初始化流程
 协议初始化主要完成 Client 和 Server 的连接，然后通过该连接映射共享内存，包含三个部分。
 
-1. 建立连接。
+1. 建立连接
    1. Server 监听一个 socekt 地址，`localhost:$PORT` 或 Unix Domain Socket
    2. Client 连接该地址，得到一个连接，用于后续交换消息。
-2. 协议协商。对应上图中的1~2。
-   1. Client 发送 ExchangeMetadata，告知 Server 当前 Client 的元信息。
-   2. Server 如果不支持 Client 的协议版本，则关闭连接。
-   3. Server 如果能够支持 Client 的协议版本， 回复 ExchangeMetadata，并携带 Server 的元信息。
-   4. Client 收到 Server 返回的 ExchangeMetadata 后。如果能支持 Server 的协议版本则继续下一步，否则关闭连接。
-3. 映射共享内存，对应上图中的3~6。
+2. 版本协商
+   1. Client 发送 VersionExchange Server 当前 Client 的最高版本。
+   2. Server 回复自己能支持的最高版本和 Client 的发来的版本中小的那个。
+   3. Client 收到 Server 返回的 VersionExchange 后，采用该版本。
+3. Metadata协商
+   1. Client 发送 ExchangeMetadata，告知 Server 当前 Client 的元信息，比如需要开启的 feature。
+   2. Server 比对 Client 需要开启的 feature，并根据自身情况将不支持的 feature 去掉，返回ExchangeMetadata。
+   4. Client 收到 Server 返回的 ExchangeMetadata 后记录最终开启的 feature 集合。
+4. 映射共享内存
    1. 通过协议版本协商，Client 能够拿到 Server 的 Feature list。假设通过 Memfd 映射共享内存，Client 发送 ShareMemoryByMemfd 消息给 Server。
    2. Server 收到 **ShareMemoryByMemfd** 后，回复 AckRecvMemFd。表示当前已做好准备接收memfd
    3. Client 通过 Unix Domain Socket 发送 memfd 至 Server 。( TCP 连接不支持收发 fd )
    4. Server 完成共享内存的映射后，回复  **AckShareMemory** 。
-   5. 如果 Client 是通过文件的形式 **（ShareMemoryByFile）** 来映射共享内存，则没有上图中的4~5。
+   5. 如果 Client 是通过文件的形式 **（ShareMemoryByFile）** 来映射共享内存，则没有2~3步。
+
+### 4.2 ExchangeMetadata 格式
+
+该功能非必须，只是提供一种可扩展性。
+可以通过交换Metadata来确认最终开启的feature，因为有可能某些feature是需要两边配合的，比如是否通过定时polling而不是uds发送事件通知唤醒对端。
+
+| 字段    | 大小   | 解释                                             |
+| --------- | -------- | -------------------------------------------------- |
+| feature size  | 4 byte | 后续包含多少个feature ，后续每个feature格式定义如下                       |
+
+每个feature的格式
+| 字段    | 大小   | 解释                                             |
+| --------- | -------- | -------------------------------------------------- |
+| feature id   | 2 byte | feature标识的唯一id，新增feature必须和之前的feature id不重复   |
+| enabled | 2 byte | 是否开启。client发送时填写为1，但是server返回时可以改为0。如果enabled为0，后续feature config length不管为多少（可以为0），都应该跳过。                  |
+| feature config length    | 4 byte | 每个feature的配置的长度，如果server不认识，可以据此跳过。如果没有具体配置项或者前面enabled=0，length可以为0。                                      |
+| feature config payload | 自定义 | 每个feature的配置定义（如有），具体的格式可以由具体的实现方自行决定。下文会列出默认实现的一些feature列表 |
+
+### 4.3 feature列表
+
+#### 4.3.1 event queue polling，（feature id=1）
+
+通过定时polling 事件队列而不是uds发送事件通知唤醒对端，feature config
+
+| 字段    | 大小   | 解释                                             |
+| --------- | -------- | -------------------------------------------------- |
+| polling interval us | 4 byte | polling的间隔，单位是us |
 
 ## 五、共享内存管理
 
